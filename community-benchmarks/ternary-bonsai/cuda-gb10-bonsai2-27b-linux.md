@@ -6,7 +6,7 @@ NVIDIA DGX Spark with GB10 GPU (128 GB unified LPDDR5X memory), CUDA 13.0 on DGX
 
 With the DSpark v2 drafter (`Ternary-Bonsai-2-27B-dspark-dflash-v2-Q4_K_M.gguf`, a DSpark drafter trained for this target; exact-match verification, `--spec-draft-n-max 5`), single-prompt generation in `llama-speculative-simple` with a 2,000-token budget reaches a mean of **64.4 t/s over six prompts (2.16x)** and **71.8 t/s on math (2.41x)**. The llama-server workload matrix compares DSpark v2 and DSpark v1 (the Ternary-Bonsai-27B drafter, re-converted for this target) against the same server with no drafter. It covers 62 prompts. The two drafters tie on the blended 40-prompt set: **57.4 t/s (1.93x)** for DSpark v2 against **57.7 t/s (1.94x)** for DSpark v1. Both reach 2.52x on math; DSpark v2 reaches 2.22x on code. DSpark v2 leads on code (+4%) and on the 2,000-token long-form set (+2%) with more tokens per step. DSpark v1 leads on reasoning (+5%), tool calls (+17%) and agent turns (+14%). The DSpark v2 training data holds no tool-call turns. DSpark v2 is the drafter that this entry reproduces from an open recipe, with the better code and long-form profile. It is not the faster drafter. For context, the [Ternary-Bonsai-27B entry](cuda-gb10-27b-linux.md) on the same hardware reports 70.0 t/s (2.45x) for the older model with its own drafter on one 512-token code prompt.
 
-Both drafters need a runtime fix. No released binary runs any drafter on this target without it: the released runtime accepts 0.4-2.0% of drafted tokens and gives no warning. See Configuration.
+Both drafters need the runtime fix merged as [PrismML-Eng/llama.cpp#210](https://github.com/PrismML-Eng/llama.cpp/pull/210) (`ede9f73`, shipped in the `prism-b10735-842b188` release). Without it, the released binaries available when these runs were made accept only 0.4-2.0% of drafted tokens, with no warning. **The DSpark numbers in this entry require the tested drafter files and a runtime built from that fix; the stock `setup.sh` install does not deliver them.** See Configuration and Reproduction.
 
 ## llama-bench Results
 
@@ -59,10 +59,10 @@ Three llama-server configurations ran with `-ngl 99 -fa on -c 16384 -np 1 --jinj
 
 PrismML ships no drafter for Bonsai 2: `scripts/download_models.sh` fetches none for this family, and the Bonsai 2 GGUF repositories hold none. The DSpark v1 file is the Ternary-Bonsai-27B drafter (`Ternary-Bonsai-27B-dspark-bf16.gguf`, trained for the older model), re-converted against the Bonsai 2 `PQ2_0` target with `gguf_dspark_to_dflash.py --drop-shared-tensors` and quantized to `Q4_0`. It borrows the token embedding and the output head from the Bonsai 2 target. With the runtime fix, it transfers to this target. Its GGUF header keeps `general.name = Bonsai-27B-dspark`, `dflash.target_layers = [2, 17, 32, 47, 62]` and block size 4. Its rows show a cross-generation drafter for comparison, and the tables label it "DSpark v1 (Ternary-Bonsai-27B drafter, K=4)". `--spec-draft-n-max 5` clamps to its block size 4 with a warning, so the n-max 4 numbers stand for both settings.
 
-Notes for `BONSAI_SPECULATIVE=1 ./scripts/start_llama_server.sh`:
+Notes on draft length:
 
-- The launcher takes the first `*dspark-dflash*.gguf` in the model directory in glob order. `...-dspark-dflash-Q4_0.gguf` sorts before `...-dspark-dflash-v2-Q4_K_M.gguf`, so with both files present the launcher picks DSpark v1. Keep one drafter in the directory, or pass `-md` directly.
-- The launcher reads the draft length from the GGUF key `dspark.dspark.block_size` (`bonsai_dspark_block_size` in `scripts/common.sh`). A converted file carries `dflash.block_size` instead, so the launcher falls back to n-max 4. Set `BONSAI_SPEC_NMAX=5` for DSpark v2 (the central environment reference still lists this variable as PowerShell-only; the Linux launcher reads it too). `scripts/common.sh` and [SPECULATIVE.md](../../SPECULATIVE.md) state that n-max must equal the block size and that a smaller value crashes; that rule reflects an earlier runtime. On prism `1a07bfa5f` plus the fix, DSpark v2 (block size 7) ran at n-max 5 through the whole benchmark. Every draft round drafted 5 tokens, and no run crashed. An n-max above the block size is clamped to the block size with a warning. n-max 5 gave the best rate for DSpark v2 in our sweeps.
+- The demo launcher's Bonsai 2 family guard disables speculative decoding even when a drafter is present, so this entry uses direct `llama-server` commands with the tested flags instead of `BONSAI_SPECULATIVE=1`.
+- `scripts/common.sh` and [SPECULATIVE.md](../../SPECULATIVE.md) state that n-max must equal the drafter's block size and that a smaller value crashes; that rule reflects an earlier runtime. On the patched runtime, DSpark v2 (block size 7) ran at n-max 5 through the whole benchmark. Every draft round drafted 5 tokens, and no run crashed. An n-max above the block size is clamped to the block size with a warning. n-max 5 gave the best rate for DSpark v2 in our sweeps.
 
 Three passes sent the same prompt to `POST /completion` in the ChatML template, at temperature 0 and seed 42, with a 256-token budget. The prompt: "Implement quicksort in Python with type hints, tests, and a concise complexity explanation".
 
@@ -182,7 +182,7 @@ DSpark v2 draws 28% more power than the no-drafter server and uses 30% less ener
 
 ## Exactness
 
-Both drafters run with exact-match verification. The server accepts a drafted token only when it equals the token the target picks at temperature 0 from the batched verify logits. The drafter changes the speed, not the sampling rule. We measured exactness on all 65 outputs of the single-slot runs (62 prompts, with three passes of the quicksort prompt). For each output we compared the drafter output with the no-drafter output for the same prompt and pass, both at temperature 0 and seed 42. A `/completion` output is identical when its token id sequence equals the no-drafter sequence. A chat output (reasoning, answer, tool calls) is compared as text, because that endpoint returns no token ids. Result: 37 of 65 outputs are identical for DSpark v1, and 37 of 65 for DSpark v2. The 28 outputs that differ are the same 28 for both drafters. The first difference is at the same 0-based position for both. Examples: reasoning-06 at token 1, long-form-03 at token 9, code-06 at token 59, math-01 at token 255 and tool-05 at character 1773. Two different drafters do not produce the same 28 divergence points if the draft causes them. The position depends on the prompt, not on the draft. The cause is the verify pass. It scores several positions in one batch, and the batched kernels round differently from single-row decode. At a near-tie token the argmax flips. Given the batched logits, acceptance is exact. The no-drafter server gives identical output across repeated passes. So this entry does not claim byte-identical output. Speculative decoding on this runtime is exact given the batched logits, and identical to plain greedy decoding on 37 of 65 outputs here. The 200-token probes in Configuration reproduce count for count and byte for byte across the two patched builds. That is a different claim: the same fix on two binaries on the same code path, not drafter output against a plain run.
+Both drafters run with exact-match verification. The server accepts a drafted token only when it equals the token the target picks at temperature 0 from the batched verify logits. The drafter changes the speed, not the sampling rule. We measured exactness on all 65 outputs of the single-slot runs (62 prompts, with three passes of the quicksort prompt). For each output we compared the drafter output with the no-drafter output for the same prompt and pass, both at temperature 0 and seed 42. A `/completion` output is identical when its token id sequence equals the no-drafter sequence. A chat output (reasoning, answer, tool calls) is compared as text, because that endpoint returns no token ids. Result: 37 of 65 outputs are identical for DSpark v1, and 37 of 65 for DSpark v2. The 28 outputs that differ are the same 28 for both drafters. The first difference is at the same 0-based position for both. Examples: reasoning-06 at token 1, long-form-03 at token 9, code-06 at token 59, math-01 at token 255 and tool-05 at character 1773. Two different drafters diverging at the same points suggests the draft is not the cause, but it is not proof, and it does not rule out a shared verification/state issue on the drafter and no-drafter paths. We did not run same-prefix logit comparisons, so we cannot attribute the flips to a specific kernel. A likely explanation is the verify pass: it scores several positions in one batch, and the batched kernels may round differently from single-row decode, which can flip the argmax at a near-tie token. Given the batched logits, acceptance is exact. The no-drafter server gives identical output across repeated passes. So this entry does not claim byte-identical output. Speculative decoding on this runtime is exact given the batched logits, and identical to plain greedy decoding on 37 of 65 outputs here. The 200-token probes in Configuration reproduce count for count and byte for byte across the two patched builds. That is a different claim: the same fix on two binaries on the same code path, not drafter output against a plain run.
 
 ## How the DSpark v2 drafter was trained
 
@@ -197,8 +197,8 @@ DSpark v2 is a DSpark drafter trained for this target. It uses the standard `dfl
 
 - All layers offloaded; flash attention enabled; one server slot unless the Multi-slot section says otherwise; the server applied the model's chat template (`--jinja`)
 - llama-bench: PrismML-Eng/llama.cpp `prism` commit `5d80cff0b` (build 10687), built for CUDA architecture `121a`
-- DSpark runs: PrismML-Eng/llama.cpp `prism` commit `1a07bfa5f` (build 10706) plus the fix of [PrismML-Eng/llama.cpp#210](https://github.com/PrismML-Eng/llama.cpp/pull/210) ("dflash: apply the target's Hadamard transforms to borrowed embeddings and head", branch `fix/dflash-borrowed-hadamard`, commit `288859a96`), same build flags. `--version` prints `build 10706, commit 1a07bfa5f` for clean and patched binaries alike, so tell them apart by path. The patched build reproduces the acceptance counts and the output text of every 200-token probe above bit for bit (148/284, 137/319, 143/289). This compares the same fix on two builds on the same code path. It is not a claim that drafter output equals no-drafter output (see Exactness). The bare-loop speeds were recorded on build 10687 with an earlier form of the same fix.
-- Why the fix: both drafters borrow the token embedding and the output head from the target, and the `PQ2_0` target stores both in the Hadamard-rotated basis. Without the fix the draft graph skips the transforms. Clean `1a07bfa5f` and the release tag `prism-b10683-d8f26ee` that `setup.sh` installs give 0.4-2.0% acceptance for any borrowed-embedding drafter on this target, with no error and no warning. Exact-match verification keeps the output correct, so only the acceptance counter and the speed show the defect. Build from source with the fix.
+- DSpark runs: PrismML-Eng/llama.cpp `prism` commit `1a07bfa5f` (build 10706) plus the fix of [PrismML-Eng/llama.cpp#210](https://github.com/PrismML-Eng/llama.cpp/pull/210) ("dflash: apply the target's Hadamard transforms to borrowed embeddings and head"). The fix is now merged as `ede9f73` and ships in the `prism-b10735-842b188` release; use the merged commit or that release to reproduce. The measurements in this entry were recorded on the PR-branch commit `288859a96`. `--version` prints `build 10706, commit 1a07bfa5f` for clean and patched binaries alike, so tell them apart by path. The patched build reproduces the acceptance counts and the output text of every 200-token probe above bit for bit (148/284, 137/319, 143/289). This compares the same fix on two builds on the same code path. It is not a claim that drafter output equals no-drafter output (see Exactness). The bare-loop speeds were recorded on build 10687 with an earlier form of the same fix.
+- Why the fix: both drafters borrow the token embedding and the output head from the target, and the `PQ2_0` target stores both in the Hadamard-rotated basis. Without the fix the draft graph skips the transforms. Clean `1a07bfa5f` and the release tag `prism-b10683-d8f26ee` that `setup.sh` installed at the time of these runs give 0.4-2.0% acceptance for any borrowed-embedding drafter on this target, with no error and no warning. Exact-match verification keeps the output correct, so only the acceptance counter and the speed show the defect. Build from source at `ede9f73`, or use the `prism-b10735-842b188` release, which ships the fix.
 - Measured acceptance, `llama-speculative-simple`, 200 tokens, temperature 0, the three prompts of the 200-token table, clean `1a07bfa5f` against `1a07bfa5f` plus the fix:
 
 | drafter | n-max | prompt | clean `1a07bfa5f` | `1a07bfa5f` + fix |
@@ -215,19 +215,18 @@ DSpark v2 is a DSpark drafter trained for this target. It uses the standard `dfl
 
 ## Reproduction
 
-Run these commands from the demo checkout after `BONSAI_FAMILY=bonsai2 BONSAI_MODEL=27B ./setup.sh`. The setup installs release binaries without the fix, so step 2 builds the runtime from source. The download location of the DSpark v2 file is not published yet; replace `<HF-REPO>` when it is.
+**Scope:** these commands are illustrative and require separately obtained artifacts: the DSpark v2 drafter and a runtime built from the merged fix (`ede9f73`, or the `prism-b10735-842b188` release). The stock `setup.sh` install does not deliver these speeds. Run them from the demo checkout after `BONSAI_FAMILY=bonsai2 BONSAI_MODEL=27B ./setup.sh`. The download location of the DSpark v2 file is not published yet; replace `<HF-REPO>` when it is.
 
 ```bash
-# 1. drafter (1.03 GiB); keep it as the only *dspark-dflash*.gguf in the directory (see the launcher notes)
+# 1. DSpark v2 drafter (1.03 GiB, separately obtained artifact)
 hf download <HF-REPO> Ternary-Bonsai-2-27B-dspark-dflash-v2-Q4_K_M.gguf --local-dir models/bonsai2-gguf/27B
 
-# 2. runtime: prism 1a07bfa5f plus the fix of PR #210, CUDA build for the GB10
+# 2. runtime: merged PR #210 fix (ede9f73), CUDA build for the GB10
 git clone https://github.com/PrismML-Eng/llama.cpp.git
-git -C llama.cpp fetch https://github.com/usmaneth/llama.cpp fix/dflash-borrowed-hadamard
-git -C llama.cpp checkout 288859a96   # prism 1a07bfa5f plus the fix of PR #210; use the merge commit once the PR lands
+git -C llama.cpp checkout ede9f73   # merged fix; also shipped in the prism-b10735-842b188 release
 cmake -S llama.cpp -B llama.cpp/build-cuda -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121a \
   -DGGML_CUDA_FA=ON -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build llama.cpp/build-cuda -j 18 --target llama-speculative-simple llama-server llama-bench
+cmake --build llama.cpp/build-cuda -j 18 --target llama-speculative-simple llama-server llama-bench llama-quantize
 export LD_LIBRARY_PATH=$PWD/llama.cpp/build-cuda/bin
 
 # 3. acceptance check, temperature 0, 200 tokens (the "math" row of the 200-token table)
@@ -256,15 +255,7 @@ curl -s http://127.0.0.1:8080/completion -H 'Content-Type: application/json' -d 
 
 Acceptance for a server run is `timings.draft_n_accepted / timings.draft_n` from the `/completion` response; `/v1/chat/completions` carries the same object. The server puts these counters in the response only when a drafter is loaded. Through the chat template (`--jinja`) the model thinks first, so a short `max_tokens` ends inside the reasoning block with `finish_reason: length`.
 
-To run through the demo launcher instead of step 4, copy the patched binaries over the release ones and set the draft length by hand:
-
-```bash
-mkdir -p bin/cuda   # the setup installs CPU binaries on aarch64, so this directory may not exist
-cp llama.cpp/build-cuda/bin/llama-server llama.cpp/build-cuda/bin/llama-speculative-simple \
-   llama.cpp/build-cuda/bin/llama-bench llama.cpp/build-cuda/bin/*.so* bin/cuda/
-LD_LIBRARY_PATH=bin/cuda bin/cuda/llama-server --version      # expect commit 1a07bfa5f
-BONSAI_SPECULATIVE=1 BONSAI_SPEC_NMAX=5 ./scripts/start_llama_server.sh
-```
+The demo launcher is not used here: its Bonsai 2 family guard disables speculative decoding even when a drafter is present, so run `llama-server` directly with the flags in step 4.
 
 To rebuild the DSpark v1 file for the comparison rows:
 
